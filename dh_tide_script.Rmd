@@ -1,0 +1,152 @@
+---
+title: "dh_tide_script"
+author: "Daniel Duncan"
+date: "2025-09-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load in packages with setup script
+```{r}
+source("setup.R")
+```
+
+Set Drayton Harbor API Vars
+```{r}
+drayton_id = "9449679" 
+product = "predictions"
+datum = "MLLW"
+hiloint = "hilo"
+sixint = "6"
+units = "english"
+time_zone = "lst_ldt"
+format = "csv"
+dh_thresh = 3.00
+skagit_thresh = 5.00
+```
+
+Set dynamic dates for API request (return next week dates)
+```{r}
+# Get today's date
+today <- Sys.Date()
+# Find the start of the current week (Monday)
+start_current_week <- today - wday(today - 1)
+# Begin date is next week's Monday
+begin_date <- start_current_week + 8
+# End date is Friday of next week
+end_date <- begin_date + 4
+```
+
+Create API URL based on vars for DH
+```{r}
+base_url <- 'https://api.tidesandcurrents.noaa.gov/api/prod/datagetter?'
+dh_url <- paste0(base_url, 
+                 'station=', drayton_id,
+                 '&begin_date=', begin_date,
+                 '&end_date=', end_date,
+                 '&product=', product,
+                 '&datum=', datum,
+                 '&interval=', sixint,
+                 '&units=', units,
+                 '&time_zone=', time_zone,
+                 '&format=', format)
+```
+
+Retrieve tidal prediction data from API; transformed into dataframe.
+Convert date from char var to date.
+```{r}
+dh_data <- read.csv(url(dh_url))
+dh_data$Date.Time <- ymd_hm(dh_data$Date.Time)
+```
+
+Create a dataframe (dh_lowtide) which shows low tide times per day
+```{r}
+dh_lowtide <- dh_data %>%
+  mutate(date = as.Date(Date.Time)) %>%
+  group_by(date) %>%
+  summarise(
+    low_tide = min(Prediction, na.rm = TRUE),
+    time  = Date.Time[which.min(Prediction)]) %>%
+  select(-date) %>%
+  ungroup() %>% 
+  mutate(low_time = format(as.POSIXct(time), format = "%H:%M:%S"))
+```
+
+Find all predictions within the 3ft trapping window
+```{r}
+dh_win <- dh_data %>% 
+  mutate(date = as.Date(Date.Time)) %>%
+  group_by(date) %>%
+  filter(Prediction <= dh_thresh)
+```
+
+Find the daily trapping window start and end times
+```{r}
+dh_win_begin <- dh_win %>% 
+  slice_head(n = 1) %>% 
+  ungroup() %>% 
+  select(-date)
+
+dh_win_end <- dh_win %>% 
+  slice_tail(n = 1) %>% 
+  ungroup() %>% 
+  select(-date)
+```
+
+Combine begin and end time df into single df
+```{r}
+dh_win_bind <- rbind(dh_win_begin, dh_win_end) %>%  arrange(Date.Time) %>% 
+  mutate('Tide Level' = Prediction) %>% 
+  select(-Prediction)
+print(dh_win_bind)
+```
+
+Create column in dh_data which identifies all Predictions within the 3ft tide window
+```{r}
+dh_data_window <- dh_data %>% 
+  filter(!is.na(Prediction)) %>% 
+  mutate(tide_window = (if_else(Prediction <= dh_thresh, 'yes', 'no')))
+```
+
+Create Tidal Prediction chart for Drayton Harbor
+- Creates line graph from all prediction data, color coding once within the trapping window
+- Overlays plot of the daily low tide level and time
+```{r}
+ggplot() +
+  geom_line(data = dh_data_window, 
+            aes(x = Date.Time, y = Prediction), 
+            color = if_else(dh_data_window$tide_window == 'yes','#8be9fd','#ff5555'), 
+            linewidth = 1) +
+  geom_point(data = dh_lowtide, 
+             aes(x = time, y = low_tide), 
+             color = "#50fa7b", 
+             size = 3) +
+  geom_text(data = dh_lowtide, 
+            aes(x = time, y = low_tide, 
+                label = paste('',low_tide,'ft','\n',low_time), 
+                size = 1,
+                hjust = -0.3,
+                vjust = 0)) +
+  geom_hline(yintercept = dh_thresh, 
+             linetype = "dashed", 
+             color = "#f8f8f2") +
+  labs(caption = paste('Tidal Predictions for Drayton Harbor between', 
+                       begin_date, 'and', 
+                       end_date, '(Source: NOAA CO-OPS)'),
+       title = 'Drayton Harbor (Station ID: 9449679)',
+       x = 'Date',
+       y = 'Tide Level (ft)') +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = '#44475a', colour = '#282a36'),
+        plot.background = element_rect(fill = "#282a36"),
+        axis.text.x = element_text(colour="#f8f8f2"),
+        axis.text.y = element_text(colour="#f8f8f2"),
+        title = element_text(colour = "#f8f8f2"),
+        plot.caption = element_text(hjust = 0.5),
+        plot.title = element_text(size = 15),
+        legend.position = 'none')
+```
